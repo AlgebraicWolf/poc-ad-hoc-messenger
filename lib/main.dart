@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -100,9 +101,12 @@ class _MyHomePageState extends State<MyHomePage> {
 
   void _sendMessage(String str) {
     print("Sending a message: " + str);
+    MyMessage msg = MyMessage(str, true);
     setState(() {
       _messages.add(MyMessage(str, true));
     });
+
+    interactor.sendMessage(msg);
 
     _messageScrollController
         .jumpTo(_messageScrollController.position.maxScrollExtent);
@@ -187,6 +191,12 @@ class NetworkInteractor {
 
   bool isInit = false;
 
+  void sendMessage(MyMessage msg) {
+    connectedDevices.map((Device d) {
+      nearbyService.sendMessage(d.deviceId, msg.toString());
+    });
+  }
+
   void dispose() {
     subscription?.cancel();
     receivedDataSubscription?.cancel();
@@ -200,11 +210,11 @@ class NetworkInteractor {
           serviceType: "ad_hoc_msg",
           strategy: Strategy.Wi_Fi_P2P,
           callback: (isRunning) async {
-            // await nearbyService.stopAdvertisingPeer();
-            // await nearbyService.startAdvertisingPeer();
+            await nearbyService.stopAdvertisingPeer();
+            nearbyService.startAdvertisingPeer();
 
             await nearbyService.stopBrowsingForPeers();
-            await nearbyService.startBrowsingForPeers();
+            nearbyService.startBrowsingForPeers();
           });
       subscription =
           nearbyService.stateChangedSubscription(callback: (devicesList) {
@@ -212,13 +222,17 @@ class NetworkInteractor {
           print(
               " deviceId: ${element.deviceId} | deviceName: ${element.deviceName} | state: ${element.state}");
 
-          if (Platform.isAndroid) {
-            if (element.state == SessionState.connected) {
-              nearbyService.stopBrowsingForPeers();
-            } else {
-              nearbyService.startBrowsingForPeers();
-            }
-          }
+          if (element.state == SessionState.notConnected)
+            nearbyService.invitePeer(
+                deviceID: element.deviceId, deviceName: element.deviceName);
+
+          // if (Platform.isAndroid) {
+          //   if (element.state == SessionState.connected) {
+          //     nearbyService.stopBrowsingForPeers();
+          //   } else {
+          //     nearbyService.startBrowsingForPeers();
+          //   }
+          // }
         });
 
         devices.clear();
@@ -228,6 +242,11 @@ class NetworkInteractor {
         connectedDevices.addAll(devicesList
             .where((d) => d.state == SessionState.connected)
             .toList());
+      });
+
+      receivedDataSubscription =
+          nearbyService.dataReceivedSubscription(callback: (data) {
+        print("dataReceivedSubscription: ${jsonEncode(data)}");
       });
 
       isInit = true;
