@@ -83,13 +83,25 @@ class _MyHomePageState extends State<MyHomePage> {
   static const textStyle = TextStyle(fontSize: 20.0);
 
   int _counter = 0;
+  bool _requiresScrolling = false;
 
   _MyHomePageState() {
     interactor.init();
-    _messages.add(MyMessage("Hello Joe", true));
-    _messages.add(MyMessage("Hello Mike", false));
-    _messages.add(MyMessage("Hello Robert", true));
-    _messages.add(MyMessage("Hello Mike", false));
+    interactor.connectedUsersCount.addListener(() {
+      setState(() {});
+    });
+
+    interactor.setMessageCallback(callback: (MyMessage msg) {
+      setState(() {
+        _messages.add(msg);
+        _requiresScrolling = true;
+      });
+    });
+
+    // _messages.add(MyMessage("Hello Joe", true));
+    // _messages.add(MyMessage("Hello Mike", false));
+    // _messages.add(MyMessage("Hello Robert", true));
+    // _messages.add(MyMessage("Hello Mike", false));
   }
 
   Widget _buildMessage(MyMessage msg) {
@@ -100,16 +112,24 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _sendMessage(String str) {
+    if (str.isEmpty) return;
+
     print("Sending a message: " + str);
     MyMessage msg = MyMessage(str, true);
     setState(() {
       _messages.add(MyMessage(str, true));
+      _requiresScrolling = true;
     });
 
     interactor.sendMessage(msg);
+  }
 
-    _messageScrollController
-        .jumpTo(_messageScrollController.position.maxScrollExtent);
+  void _scrollToTheEnd() {
+    _messageScrollController.animateTo(
+      _messageScrollController.position.maxScrollExtent,
+      duration: Duration(milliseconds: 200),
+      curve: Curves.fastOutSlowIn,
+    );
   }
 
   @override
@@ -121,6 +141,13 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
+    if (_requiresScrolling) {
+      WidgetsBinding.instance.addPostFrameCallback((timeStamp) {
+        _scrollToTheEnd();
+      });
+
+      _requiresScrolling = false;
+    }
     return Scaffold(
       backgroundColor: Color.fromARGB(255, 220, 220, 235),
       appBar: AppBar(
@@ -129,6 +156,10 @@ class _MyHomePageState extends State<MyHomePage> {
         title: Text(widget.title),
       ),
       body: Column(children: [
+        Text(
+          "Connected clients: ${interactor.connectedUsersCount.value}",
+          style: textStyle,
+        ),
         Expanded(
             child: ListView(
           padding: EdgeInsets.all(8),
@@ -188,12 +219,21 @@ class NetworkInteractor {
   final nearbyService = NearbyService();
   StreamSubscription subscription;
   StreamSubscription receivedDataSubscription;
+  Function(MyMessage) messageCallback;
 
   bool isInit = false;
 
+  final connectedUsersCount = ValueNotifier<int>(0);
+
+  void setMessageCallback({Function(MyMessage) callback}) {
+    messageCallback = callback;
+  }
+
   void sendMessage(MyMessage msg) {
-    connectedDevices.map((Device d) {
-      nearbyService.sendMessage(d.deviceId, msg.toString());
+    print("Sending message to ${connectedDevices.length} devices");
+    connectedDevices.forEach((Device d) {
+      print("Sending message ${msg.text} to ${d.deviceId}");
+      nearbyService.sendMessage(d.deviceId, msg.text);
     });
   }
 
@@ -206,6 +246,8 @@ class NetworkInteractor {
 
   void init() async {
     if (!isInit) {
+      messageCallback = (MyMessage) {}; // callback stub
+
       await nearbyService.init(
           serviceType: "ad_hoc_msg",
           strategy: Strategy.Wi_Fi_P2P,
@@ -242,11 +284,15 @@ class NetworkInteractor {
         connectedDevices.addAll(devicesList
             .where((d) => d.state == SessionState.connected)
             .toList());
+
+        connectedUsersCount.value = connectedDevices.length;
+        connectedUsersCount.notifyListeners();
       });
 
       receivedDataSubscription =
           nearbyService.dataReceivedSubscription(callback: (data) {
-        print("dataReceivedSubscription: ${jsonEncode(data)}");
+        print("Received message: ${jsonEncode(data)}");
+        messageCallback(MyMessage(data["message"], false));
       });
 
       isInit = true;
