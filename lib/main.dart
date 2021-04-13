@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:bubble/bubble.dart';
 import 'package:flutter_nearby_connections/flutter_nearby_connections.dart';
+import 'package:tuple/tuple.dart';
 import 'utility/MyMessage.dart';
 
 void main() {
@@ -81,9 +83,11 @@ class _MyHomePageState extends State<MyHomePage> {
   );
 
   static const textStyle = TextStyle(fontSize: 20.0);
+  static const handleStyle = TextStyle(fontSize: 13.0, color: Colors.blueGrey);
 
   int _counter = 0;
   bool _requiresScrolling = false;
+  bool _setHandle = false;
 
   _MyHomePageState() {
     interactor.init();
@@ -106,7 +110,20 @@ class _MyHomePageState extends State<MyHomePage> {
 
   Widget _buildMessage(MyMessage msg) {
     return Bubble(
-      child: Text(msg.text, style: textStyle),
+      child: Column(
+        children: [
+          Text(
+            msg.handle,
+            style: handleStyle,
+            textAlign: msg.mine ? TextAlign.right : TextAlign.left,
+          ),
+          Text(
+            msg.text,
+            style: textStyle,
+            textAlign: msg.mine ? TextAlign.right : TextAlign.left,
+          ),
+        ],
+      ),
       style: msg.mine ? styleMe : styleSomebody,
     );
   }
@@ -114,10 +131,17 @@ class _MyHomePageState extends State<MyHomePage> {
   void _sendMessage(String str) {
     if (str.isEmpty) return;
 
+    if (!_setHandle) {
+      print("Setting handle ${str}");
+      _setHandle = true;
+      interactor.setHandle(str);
+      return;
+    }
+
     print("Sending a message: " + str);
-    MyMessage msg = MyMessage(str, true);
+    MyMessage msg = MyMessage(str, "Я", true);
     setState(() {
-      _messages.add(MyMessage(str, true));
+      _messages.add(msg);
       _requiresScrolling = true;
     });
 
@@ -157,7 +181,7 @@ class _MyHomePageState extends State<MyHomePage> {
       ),
       body: Column(children: [
         Text(
-          "Connected clients: ${interactor.connectedUsersCount.value}",
+          "Disc: ${interactor.discoveredUsersCount.value} | Connecting: ${interactor.connectingUsersCount.value} | Connected: ${interactor.connectedUsersCount.value}",
           style: textStyle,
         ),
         Expanded(
@@ -217,23 +241,63 @@ class NetworkInteractor {
   final devices = <Device>[];
   final connectedDevices = <Device>[];
   final nearbyService = NearbyService();
+  final randomNumberGenerator = Random(DateTime.now().millisecondsSinceEpoch);
+
+  // Set for storing message IDs that were already used. TODO flush old ones somehow.
+  final usedRandomIds = Set<int>();
+  // Set for storing message IDs that were already received. TODO flush old ones somehow.
+  final receivedHandlesIds = Set<Tuple2<String, int>>();
+
+  String myHandle;
+
   StreamSubscription subscription;
   StreamSubscription receivedDataSubscription;
   Function(MyMessage) messageCallback;
 
   bool isInit = false;
 
+  final discoveredUsersCount = ValueNotifier<int>(0);
+  final connectingUsersCount = ValueNotifier<int>(0);
   final connectedUsersCount = ValueNotifier<int>(0);
 
   void setMessageCallback({Function(MyMessage) callback}) {
     messageCallback = callback;
   }
 
+  void setHandle(String newHandle) {
+    myHandle = newHandle;
+  }
+
+  // Function for getting a randomId for a new message
+  int getRandomId() {
+    int n = 0;
+
+    do {
+      n = randomNumberGenerator.nextInt(1 << 32); // Generate id
+    } while (usedRandomIds.contains(n));
+
+    return n;
+  }
+
+  // Function for checking whether the message has already been received
+  bool alreadyProcessed(NetworkMessage msg) {
+    var pair = Tuple2(msg.handle, msg.randomId);
+
+    return receivedHandlesIds
+        .contains(pair); // Check that a message was not previously received
+  }
+
   void sendMessage(MyMessage msg) {
     print("Sending message to ${connectedDevices.length} devices");
+    final nm = NetworkMessage.fromMyMessage(msg, getRandomId(), myHandle);
+
+    sendNetworkMessage(nm);
+  }
+
+  void sendNetworkMessage(NetworkMessage msg) {
     connectedDevices.forEach((Device d) {
       print("Sending message ${msg.text} to ${d.deviceId}");
-      nearbyService.sendMessage(d.deviceId, msg.text);
+      nearbyService.sendMessage(d.deviceId, jsonEncode(msg));
     });
   }
 
@@ -250,7 +314,7 @@ class NetworkInteractor {
 
       await nearbyService.init(
           serviceType: "ad_hoc_msg",
-          strategy: Strategy.Wi_Fi_P2P,
+          strategy: Strategy.P2P_CLUSTER,
           callback: (isRunning) async {
             await nearbyService.stopAdvertisingPeer();
             nearbyService.startAdvertisingPeer();
@@ -285,14 +349,32 @@ class NetworkInteractor {
             .where((d) => d.state == SessionState.connected)
             .toList());
 
+        discoveredUsersCount.value = devices.length;
+        connectingUsersCount.value = devices
+            .where((d) => d.state == SessionState.connecting)
+            .toList()
+            .length;
         connectedUsersCount.value = connectedDevices.length;
+
         connectedUsersCount.notifyListeners();
+        discoveredUsersCount.notifyListeners();
+        connectingUsersCount.notifyListeners();
       });
 
       receivedDataSubscription =
           nearbyService.dataReceivedSubscription(callback: (data) {
-        print("Received message: ${jsonEncode(data)}");
-        messageCallback(MyMessage(data["message"], false));
+        NetworkMessage nm = NetworkMessage.fromJson(
+            jsonDecode(data['message'])); // Parse the message
+        print("Received message: ${jsonEncode(data)}"); // Message reception
+
+        // Check that message was not processed and it is not a message of mine
+        if (!alreadyProcessed(nm) && nm.handle != myHandle) {
+          receivedHandlesIds
+              .add(Tuple2(nm.handle, nm.randomId)); // Mark received
+
+          sendNetworkMessage(nm); // Resend this shit
+          messageCallback(MyMessage.fromNetworkMessage(nm));
+        }
       });
 
       isInit = true;
